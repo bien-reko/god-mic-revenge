@@ -8,22 +8,60 @@ const { View, Text, TouchableOpacity, ScrollView } = ReactNative;
 
 const MediaEngineActions = findByProps("setInputVolume", "setOutputVolume");
 const MediaEngineStore = findByProps("getInputVolume", "getEchoCancellation");
+const FluxDispatcher = findByProps("dispatch", "subscribe");
+const SelectedChannelStore = findByProps("getVoiceChannelId");
+const ChannelStore = findByProps("getChannel");
 
-// God Gain Mathematical Multiplier (10^(dB/20))
+// Advanced Tier Real-Time Hardware & Encoder Gain Injector
 export function applyGodGain(gainDb: number) {
   try {
     const linearMultiplier = Math.pow(10, gainDb / 20);
-    const targetVolume = Math.round(100 * linearMultiplier); // +25dB = 1778% volume
+    const targetVolume = Math.round(100 * linearMultiplier); // +25dB = 1778%
 
+    // 1. Dispatch internal audio state update
+    if (FluxDispatcher?.dispatch) {
+      FluxDispatcher.dispatch({
+        type: "AUDIO_SET_INPUT_VOLUME",
+        volume: targetVolume,
+      });
+      // Kill compressor and phase cancelers so the gain is never compressed
+      FluxDispatcher.dispatch({
+        type: "AUDIO_SET_AUTOMATIC_GAIN_CONTROL",
+        automaticGainControl: false,
+      });
+      FluxDispatcher.dispatch({
+        type: "AUDIO_SET_ECHO_CANCELLATION",
+        echoCancellation: false,
+      });
+      FluxDispatcher.dispatch({
+        type: "AUDIO_SET_NOISE_SUPPRESSION",
+        noiseSuppression: false,
+      });
+    }
+
+    // 2. High-level UI Action
     if (MediaEngineActions?.setInputVolume) {
       MediaEngineActions.setInputVolume(targetVolume);
     }
+
+    // 3. Native WebRTC Connection Injection
     const nativeEngine = MediaEngineStore?.getMediaEngine?.();
-    if (nativeEngine?.setInputVolume) {
-      nativeEngine.setInputVolume(targetVolume);
+    if (nativeEngine) {
+      if (nativeEngine.setInputVolume) {
+        nativeEngine.setInputVolume(targetVolume);
+      }
+      if (nativeEngine.connections) {
+        nativeEngine.connections.forEach((conn: any) => {
+          try {
+            if (conn.input?.setVolume) {
+              conn.input.setVolume(linearMultiplier);
+            }
+          } catch {}
+        });
+      }
     }
   } catch (err) {
-    console.error("[GOD_MIC_ERR]", err);
+    console.error("[GOD_MIC_GAIN_ERR]", err);
   }
 }
 
@@ -37,12 +75,23 @@ export default function Settings() {
     { label: "+30dB RUPTURE", val: 30.0, color: "#EF4444" },
   ];
 
+  // Resolve current VC connection
+  const activeChannelId = SelectedChannelStore?.getVoiceChannelId();
+  const activeChannel = activeChannelId ? ChannelStore?.getChannel(activeChannelId) : null;
+  const isInVC = Boolean(activeChannelId);
+
   const updateGain = (newGain: number) => {
     const clamped = Math.max(0, Math.min(35, parseFloat(newGain.toFixed(1))));
     storage.gainDb = clamped;
     applyGodGain(clamped);
+
+    const mult = Math.round(100 * Math.pow(10, clamped / 20));
     if (storage.liveToast) {
-      showToast(`⚡ [GOD MIC] Gain: +${clamped.toFixed(1)}dB (${Math.round(100 * Math.pow(10, clamped / 20))}%)`, 0);
+      if (isInVC) {
+        showToast(`⚡ [GOD MIC] LIVE in #${activeChannel?.name}: +${clamped.toFixed(1)}dB (${mult}%)`, 0);
+      } else {
+        showToast(`⚡ [GOD MIC] Standby Gain: +${clamped.toFixed(1)}dB (${mult}%)`, 0);
+      }
     }
   };
 
@@ -51,16 +100,56 @@ export default function Settings() {
   return (
     <ScrollView style={{ flex: 1, backgroundColor: "#090A0F", padding: 16 }}>
       {/* GOD HEADER */}
-      <View style={{ alignItems: "center", marginBottom: 20 }}>
+      <View style={{ alignItems: "center", marginBottom: 16 }}>
         <Text style={{ color: "#E0A96D", fontSize: 22, fontWeight: "900", letterSpacing: 1.5 }}>
           ⚡ GOD-MIC REALTIME ENGINE ⚡
         </Text>
         <Text style={{ color: "#72767D", fontSize: 12, marginTop: 4 }}>
-          Opus Overdrive • Stereo Spatial Bypass • Zero Artifacts
+          Opus Overdrive • Hardware Unclamped • Realtime Link
         </Text>
       </View>
 
-      {/* ACTIVE GAIN DISPLAY & HUD METER */}
+      {/* LIVE VC CONNECTION TELEMETRY HUD */}
+      <View
+        style={{
+          backgroundColor: isInVC ? "#0F241D" : "#1B1712",
+          borderColor: isInVC ? "#4EAA86" : "#E0A96D",
+          borderWidth: 1,
+          borderRadius: 12,
+          padding: 14,
+          marginBottom: 16,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <View
+              style={{
+                width: 10,
+                height: 10,
+                borderRadius: 5,
+                backgroundColor: isInVC ? "#4EAA86" : "#E0A96D",
+                marginRight: 8,
+              }}
+            />
+            <Text style={{ color: isInVC ? "#4EAA86" : "#E0A96D", fontWeight: "900", fontSize: 13 }}>
+              {isInVC ? "CONNECTED TO VOICE" : "STANDBY (NOT IN VC)"}
+            </Text>
+          </View>
+          <Text style={{ color: "#FFFFFF", fontWeight: "bold", fontSize: 12 }}>
+            {isInVC ? `#${activeChannel?.name ?? "Active Channel"}` : "IDLE"}
+          </Text>
+        </View>
+
+        <View style={{ marginTop: 8, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.08)", paddingTop: 8 }}>
+          <Text style={{ color: "#8A909D", fontSize: 11 }}>
+            • Live Stream: {isInVC ? "TRANSMITTING ENCODER SIGNAL" : "ARMED FOR CONNECTION"}
+            {"\n"}• Target Multiplier: {Math.round(100 * Math.pow(10, storage.gainDb / 20))}% Direct
+            {"\n"}• AGC Compressor: BYPASS FORCED (No Volume Ducking)
+          </Text>
+        </View>
+      </View>
+
+      {/* GAIN POWER DISPLAY */}
       <View
         style={{
           backgroundColor: "#12141D",
@@ -73,16 +162,16 @@ export default function Settings() {
         }}
       >
         <Text style={{ color: "#8A909D", fontSize: 13, textTransform: "uppercase" }}>
-          Active Opus Overdrive
+          Current Opus Drive Gain
         </Text>
-        <Text style={{ color: "#FFFFFF", fontSize: 38, fontWeight: "900", marginVertical: 6 }}>
+        <Text style={{ color: "#FFFFFF", fontSize: 38, fontWeight: "900", marginVertical: 4 }}>
           +{storage.gainDb.toFixed(1)} dB
         </Text>
-        <Text style={{ color: "#4EAA86", fontSize: 12, fontWeight: "bold" }}>
-          MULTIPLIER: {Math.round(100 * Math.pow(10, storage.gainDb / 20))}% POWER
+        <Text style={{ color: "#4EAA86", fontSize: 13, fontWeight: "bold" }}>
+          AMPLIFIER: {Math.round(100 * Math.pow(10, storage.gainDb / 20))}% RAW
         </Text>
 
-        {/* Dynamic Visual Meter */}
+        {/* Dynamic Visual Progress Bar */}
         <View
           style={{
             width: "100%",
@@ -103,7 +192,7 @@ export default function Settings() {
         </View>
       </View>
 
-      {/* STEPPER BUTTONS */}
+      {/* FINE TUNE STEPPERS */}
       <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 14 }}>
         <TouchableOpacity
           style={{
@@ -134,9 +223,9 @@ export default function Settings() {
         </TouchableOpacity>
       </View>
 
-      {/* GOD TIER PRESETS (WITH INSTANT +25dB PUNCH) */}
+      {/* PRESETS (WITH INSTANT +25dB PUNCH) */}
       <Text style={{ color: "#8A909D", fontSize: 12, fontWeight: "bold", marginBottom: 8, textTransform: "uppercase" }}>
-        Instant Power Presets
+        Gain Presets
       </Text>
       <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between" }}>
         {presets.map((preset) => (
@@ -167,7 +256,7 @@ export default function Settings() {
         ))}
       </View>
 
-      {/* TOGGLES */}
+      {/* SYSTEM TOGGLES */}
       <View style={{ marginTop: 10 }}>
         <TouchableOpacity
           style={{
@@ -180,14 +269,15 @@ export default function Settings() {
           }}
           onPress={() => {
             storage.stereoBypass = !storage.stereoBypass;
-            showToast(`Stereo Bypass: ${storage.stereoBypass ? "ENABLED" : "DISABLED"}`, 0);
+            applyGodGain(storage.gainDb);
+            showToast(`Stereo Bypass: ${storage.stereoBypass ? "ACTIVE" : "OFF"}`, 0);
           }}
         >
           <Text style={{ color: "#FFF", fontWeight: "bold" }}>
-            Stereo Bypass: [ {storage.stereoBypass ? "ACTIVE" : "OFF"} ]
+            Stereo Mode 2 Bypass: [ {storage.stereoBypass ? "ACTIVE" : "OFF"} ]
           </Text>
           <Text style={{ color: "#72767D", fontSize: 11, marginTop: 2 }}>
-            Disables mono downmix & bypasses phase filtering
+            Forces uncompressed dual-channel stereo without mono downsampling
           </Text>
         </TouchableOpacity>
 
@@ -201,14 +291,14 @@ export default function Settings() {
           }}
           onPress={() => {
             storage.liveToast = !storage.liveToast;
-            showToast(`Live Toast: ${storage.liveToast ? "ENABLED" : "DISABLED"}`, 0);
+            showToast(`VC Live Toast: ${storage.liveToast ? "ENABLED" : "DISABLED"}`, 0);
           }}
         >
           <Text style={{ color: "#FFF", fontWeight: "bold" }}>
-            Live VC Join Toast: [ {storage.liveToast ? "ACTIVE" : "OFF"} ]
+            VC Live Notification Toast: [ {storage.liveToast ? "ACTIVE" : "OFF"} ]
           </Text>
           <Text style={{ color: "#72767D", fontSize: 11, marginTop: 2 }}>
-            Real-time status notification badge upon joining any VC
+            Pops telemetry alerts whenever joining or adjusting gain in voice rooms
           </Text>
         </TouchableOpacity>
       </View>
