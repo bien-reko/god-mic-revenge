@@ -1,7 +1,7 @@
 {
   "name": "GodMicEngine",
-  "description": "Supreme God-Mic architecture: +5dB pure Opus gain injection, stereo spatial analyzer, and real-time VC telemetry.",
-  "author": "AcousticDeity",
-  "version": "6.6.6",
+  "description": "5dB Opus Boost, God-Mic Mono Bypass & Real-time VC Presence",
+  "author": "bien-reko",
+  "version": "1.0.0",
   "main": "index.ts"
 }
