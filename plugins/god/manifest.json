@@ -1,7 +1,7 @@
 {
-    "name": "God Mic & Gain",
-    "description": "VC Join Toasts + 15dB Mic/Audio Gain. Pure ear-rape power.",
-    "authors": [{ "name": "GOD", "id": "1" }],
-    "main": "src/index.ts",
-    "vendetta": { "icon": "ic_microphone" }
+  "name": "GodMicEngine",
+  "description": "Supreme God-Mic architecture: +5dB pure Opus gain injection, stereo spatial analyzer, and real-time VC telemetry.",
+  "author": "AcousticDeity",
+  "version": "6.6.6",
+  "main": "index.tsx"
 }
