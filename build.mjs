@@ -1,7 +1,7 @@
 import { readFile, writeFile, readdir } from "fs/promises";
+import { existsSync } from "fs";
 import { extname } from "path";
 import { createHash } from "crypto";
-
 import { rollup } from "rollup";
 import esbuild from "rollup-plugin-esbuild";
 import commonjs from "@rollup/plugin-commonjs";
@@ -10,7 +10,6 @@ import swc from "@swc/core";
 
 const extensions = [".js", ".jsx", ".mjs", ".ts", ".tsx", ".cts", ".mts"];
 
-/** @type import("rollup").InputPluginOption */
 const plugins = [
     nodeResolve(),
     commonjs(),
@@ -31,34 +30,57 @@ const plugins = [
                     parser: {
                         syntax: ts ? "typescript" : "ecmascript",
                         tsx,
-                        jsx,
-                    },
+                        jsx
+                    }
                 },
                 env: {
                     targets: "defaults",
                     include: [
                         "transform-classes",
-                        "transform-arrow-functions",
-                    ],
-                },
+                        "transform-arrow-functions"
+                    ]
+                }
             });
+
             return result.code;
-        },
+        }
     },
-    esbuild({ minify: true }),
+    esbuild({ minify: true })
 ];
 
 for (let plug of await readdir("./plugins")) {
-    const manifest = JSON.parse(await readFile(`./plugins/${plug}/manifest.json`));
+    let manifest;
+    try {
+        manifest = JSON.parse(await readFile(`./plugins/${plug}/manifest.json`));
+    } catch {
+        continue;
+    }
+
     const outPath = `./dist/${plug}/index.js`;
+
+    // SMART RESOLVER: Finds your file anywhere it might be
+    const possiblePaths = [
+        `./plugins/${plug}/${manifest.main}`,
+        `./plugins/${plug}/index.ts`,
+        `./plugins/${plug}/index.tsx`,
+        `./plugins/${plug}/src/index.ts`,
+        `./plugins/${plug}/src/index.tsx`
+    ];
+
+    let entryFile = possiblePaths.find((p) => existsSync(p));
+
+    if (!entryFile) {
+        console.error(`Could not locate entry file for plugin: ${plug}`);
+        process.exit(1);
+    }
 
     try {
         const bundle = await rollup({
-            input: `./plugins/${plug}/${manifest.main}`,
+            input: entryFile,
             onwarn: () => {},
-            plugins,
+            plugins
         });
-    
+
         await bundle.write({
             file: outPath,
             globals(id) {
@@ -66,7 +88,6 @@ for (let plug of await readdir("./plugins")) {
                 const map = {
                     react: "window.React",
                 };
-
                 return map[id] || null;
             },
             format: "iife",
@@ -74,13 +95,13 @@ for (let plug of await readdir("./plugins")) {
             exports: "named",
         });
         await bundle.close();
-    
+
         const toHash = await readFile(outPath);
         manifest.hash = createHash("sha256").update(toHash).digest("hex");
         manifest.main = "index.js";
         await writeFile(`./dist/${plug}/manifest.json`, JSON.stringify(manifest));
-    
-        console.log(`Successfully built ${manifest.name}!`);
+
+        console.log(`Successfully built ${plug}!`);
     } catch (e) {
         console.error("Failed to build plugin...", e);
         process.exit(1);
