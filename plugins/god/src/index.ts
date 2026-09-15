@@ -1,10 +1,8 @@
 import { findByProps } from "@vendetta/metro";
 import { storage } from "@vendetta/plugin";
 import { showToast } from "@vendetta/ui/toasts";
-import { instead } from "@vendetta/patcher";
 import Settings, { applyGodGain, appendLog } from "./Settings";
 
-const MediaEngineActions = findByProps("setInputVolume", "setOutputVolume");
 const MediaEngineStore = findByProps("getInputVolume", "getEchoCancellation");
 const FluxDispatcher = findByProps("dispatch", "subscribe");
 const SelectedChannelStore = findByProps("getVoiceChannelId");
@@ -18,30 +16,33 @@ let watchdogTimer: any = null;
 
 export default {
   onLoad: () => {
-    appendLog("KERNEL", "God-Mic Astral Engine initialized.", "#D0BCFF");
+    appendLog("KERNEL", "God-Mic Core Activated.", "#D0BCFF");
 
-    // 1. Initial gain injection
-    applyGodGain(storage.gainDb);
-
-    // 2. Patch MediaEngine Store to completely prevent Discord from capping volume
     try {
-      if (MediaEngineStore) {
-        unpatches.push(
-          instead("getInputVolume", MediaEngineStore, () => {
-            return Math.round(100 * Math.pow(10, storage.gainDb / 20));
-          })
-        );
-        unpatches.push(instead("getAutomaticGainControl", MediaEngineStore, () => false));
-        unpatches.push(instead("getEchoCancellation", MediaEngineStore, () => false));
-        unpatches.push(instead("getNoiseSuppression", MediaEngineStore, () => false));
-        unpatches.push(instead("getNoiseCancellation", MediaEngineStore, () => false));
-        appendLog("PATCH", "MediaEngineStore clamped getters successfully hooked.", "#C4EDD9");
+      const engine = MediaEngineStore?.getMediaEngine?.();
+      if (engine) {
+        // MONKEYPATCH NATIVE setInputVolume: Intercept Discord's 100 clamp
+        const origSetInputVolume = engine.setInputVolume?.bind(engine);
+        if (origSetInputVolume) {
+          engine.setInputVolume = function (vol: number) {
+            const linearMultiplier = Math.pow(10, storage.gainDb / 20);
+            const boosted = Math.round(100 * linearMultiplier);
+            return origSetInputVolume(boosted);
+          };
+          unpatches.push(() => {
+            engine.setInputVolume = origSetInputVolume;
+          });
+          appendLog("PATCH", "MediaEngine.setInputVolume clamp permanently hijacked.", "#6DD58C");
+        }
+
+        // Apply immediately
+        applyGodGain(storage.gainDb);
       }
     } catch (err: any) {
-      appendLog("ERROR", `Failed to patch MediaEngineStore: ${err?.message}`, "#F2B8B5");
+      appendLog("ERROR", `Failed to hook MediaEngine: ${err?.message}`, "#F2B8B5");
     }
 
-    // 3. Real-time VC Presence & Watchdog Engine
+    // REAL-TIME VC PRESENCE & WATCHDOG
     const onVoiceUpdate = (event: any) => {
       if (event.type === "RTC_CONNECTION_STATE") {
         if (event.state === "RTC_CONNECTED") {
@@ -50,13 +51,13 @@ export default {
           const channel = channelId ? ChannelStore?.getChannel(channelId) : null;
           const mult = Math.round(Math.pow(10, storage.gainDb / 20));
 
-          appendLog("WEBRTC", `RTC Connected to #${channel?.name ?? "Voice"} • Enforcing +${storage.gainDb}dB`, "#6DD58C");
+          appendLog("WEBRTC", `Handshake linked on #${channel?.name ?? "Voice"}`, "#6DD58C");
 
           if (storage.liveToast) {
             showToast(`⚡ [GOD MIC ACTIVE] Linked: #${channel?.name ?? "Voice"} | +${storage.gainDb.toFixed(1)}dB (${mult}x RAW)`, 0);
           }
 
-          // Start active 1.5s Anti-Reset Watchdog
+          // Active 1.0s Watchdog: Re-applies to connection streams continuously
           if (!watchdogTimer) {
             watchdogTimer = setInterval(() => {
               const inVC = Boolean(SelectedChannelStore?.getVoiceChannelId());
@@ -66,10 +67,10 @@ export default {
                 clearInterval(watchdogTimer);
                 watchdogTimer = null;
               }
-            }, 1500);
+            }, 1000);
           }
         } else if (event.state === "RTC_DISCONNECTED") {
-          appendLog("WEBRTC", "Voice connection closed.", "#CAC4D0");
+          appendLog("WEBRTC", "Voice connection released.", "#CAC4D0");
           if (watchdogTimer) {
             clearInterval(watchdogTimer);
             watchdogTimer = null;
@@ -89,12 +90,13 @@ export default {
       clearInterval(watchdogTimer);
       watchdogTimer = null;
     }
-    if (MediaEngineActions?.setInputVolume) {
-      MediaEngineActions.setInputVolume(100);
+    const engine = MediaEngineStore?.getMediaEngine?.();
+    if (engine?.setLoopback) {
+      try { engine.setLoopback(false); } catch {}
     }
     unpatches.forEach((u) => u());
     unpatches = [];
-    appendLog("SYS", "Plugin unloaded. Hardware volume restored.", "#F2B8B5");
+    appendLog("SYS", "God-Mic unloaded. Engine reverted.", "#F2B8B5");
   },
 
   settings: Settings,
