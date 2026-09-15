@@ -1,0 +1,7 @@
+{
+    "name": "God Mic & Gain",
+    "description": "VC Join Toasts + 15dB Mic/Audio Gain. Pure ear-rape power.",
+    "authors": [{ "name": "GOD", "id": "1" }],
+    "main": "src/index.ts",
+    "vendetta": { "icon": "ic_microphone" }
+}
