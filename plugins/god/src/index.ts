@@ -16,12 +16,17 @@ let watchdogTimer: any = null;
 
 export default {
   onLoad: () => {
-    appendLog("KERNEL", "God-Mic Core Activated.", "#D0BCFF");
+    appendLog("BOOT", "God-Mic Absolute Engine Loaded.", "#D0BCFF");
 
     try {
       const engine = MediaEngineStore?.getMediaEngine?.();
       if (engine) {
-        // MONKEYPATCH NATIVE setInputVolume: Intercept Discord's 100 clamp
+        // Switch to experimental subsystem to evade Android OS audio AGC
+        try {
+          if (engine.setAudioSubsystem) engine.setAudioSubsystem("experimental");
+        } catch {}
+
+        // Hijack engine setInputVolume to force high amplitude
         const origSetInputVolume = engine.setInputVolume?.bind(engine);
         if (origSetInputVolume) {
           engine.setInputVolume = function (vol: number) {
@@ -29,20 +34,16 @@ export default {
             const boosted = Math.round(100 * linearMultiplier);
             return origSetInputVolume(boosted);
           };
-          unpatches.push(() => {
-            engine.setInputVolume = origSetInputVolume;
-          });
-          appendLog("PATCH", "MediaEngine.setInputVolume clamp permanently hijacked.", "#6DD58C");
+          unpatches.push(() => { engine.setInputVolume = origSetInputVolume; });
         }
 
-        // Apply immediately
         applyGodGain(storage.gainDb);
       }
     } catch (err: any) {
-      appendLog("ERROR", `Failed to hook MediaEngine: ${err?.message}`, "#F2B8B5");
+      appendLog("ERROR", `Engine init error: ${err?.message}`, "#F2B8B5");
     }
 
-    // REAL-TIME VC PRESENCE & WATCHDOG
+    // REAL-TIME VC HANDSHAKE & WATCHDOG
     const onVoiceUpdate = (event: any) => {
       if (event.type === "RTC_CONNECTION_STATE") {
         if (event.state === "RTC_CONNECTED") {
@@ -51,13 +52,13 @@ export default {
           const channel = channelId ? ChannelStore?.getChannel(channelId) : null;
           const mult = Math.round(Math.pow(10, storage.gainDb / 20));
 
-          appendLog("WEBRTC", `Handshake linked on #${channel?.name ?? "Voice"}`, "#6DD58C");
+          appendLog("HANDSHAKE", `Connected to #${channel?.name ?? "Voice"} • Pinned +${storage.gainDb}dB`, "#6DD58C");
 
           if (storage.liveToast) {
-            showToast(`⚡ [GOD MIC ACTIVE] Linked: #${channel?.name ?? "Voice"} | +${storage.gainDb.toFixed(1)}dB (${mult}x RAW)`, 0);
+            showToast(`⚡ [GOD MIC ACTIVE] #${channel?.name ?? "VC"} | +${storage.gainDb.toFixed(1)}dB (${mult}x RAW)`, 0);
           }
 
-          // Active 1.0s Watchdog: Re-applies to connection streams continuously
+          // Active 800ms Watchdog: Constantly pushes gain into active WebRTC connection tracks
           if (!watchdogTimer) {
             watchdogTimer = setInterval(() => {
               const inVC = Boolean(SelectedChannelStore?.getVoiceChannelId());
@@ -67,10 +68,10 @@ export default {
                 clearInterval(watchdogTimer);
                 watchdogTimer = null;
               }
-            }, 1000);
+            }, 800);
           }
         } else if (event.state === "RTC_DISCONNECTED") {
-          appendLog("WEBRTC", "Voice connection released.", "#CAC4D0");
+          appendLog("HANDSHAKE", "Voice channel disconnected.", "#CAC4D0");
           if (watchdogTimer) {
             clearInterval(watchdogTimer);
             watchdogTimer = null;
@@ -96,7 +97,7 @@ export default {
     }
     unpatches.forEach((u) => u());
     unpatches = [];
-    appendLog("SYS", "God-Mic unloaded. Engine reverted.", "#F2B8B5");
+    appendLog("BOOT", "God-Mic Engine safely unmounted.", "#F2B8B5");
   },
 
   settings: Settings,
