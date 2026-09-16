@@ -16,17 +16,17 @@ let watchdogTimer: any = null;
 
 export default {
   onLoad: () => {
-    appendLog("BOOT", "God-Mic Absolute Engine Loaded.", "#D0BCFF");
+    appendLog("CORE", "God-Mic WebRTC Pipeline Activated.", "#D0BCFF");
 
     try {
       const engine = MediaEngineStore?.getMediaEngine?.();
       if (engine) {
-        // Switch to experimental subsystem to evade Android OS audio AGC
+        // Enforce experimental subsystem to decouple from Android OS AGC
         try {
           if (engine.setAudioSubsystem) engine.setAudioSubsystem("experimental");
         } catch {}
 
-        // Hijack engine setInputVolume to force high amplitude
+        // Hijack engine.setInputVolume to permanently override the 100 clamp
         const origSetInputVolume = engine.setInputVolume?.bind(engine);
         if (origSetInputVolume) {
           engine.setInputVolume = function (vol: number) {
@@ -40,7 +40,7 @@ export default {
         applyGodGain(storage.gainDb);
       }
     } catch (err: any) {
-      appendLog("ERROR", `Engine init error: ${err?.message}`, "#F2B8B5");
+      appendLog("ERROR", `Init error: ${err?.message}`, "#F2B8B5");
     }
 
     // REAL-TIME VC HANDSHAKE & WATCHDOG
@@ -58,7 +58,7 @@ export default {
             showToast(`⚡ [GOD MIC ACTIVE] #${channel?.name ?? "VC"} | +${storage.gainDb.toFixed(1)}dB (${mult}x RAW)`, 0);
           }
 
-          // Active 800ms Watchdog: Constantly pushes gain into active WebRTC connection tracks
+          // Active 800ms Watchdog: Continuously forces gain into active WebRTC connection streams
           if (!watchdogTimer) {
             watchdogTimer = setInterval(() => {
               const inVC = Boolean(SelectedChannelStore?.getVoiceChannelId());
@@ -71,7 +71,7 @@ export default {
             }, 800);
           }
         } else if (event.state === "RTC_DISCONNECTED") {
-          appendLog("HANDSHAKE", "Voice channel disconnected.", "#CAC4D0");
+          appendLog("HANDSHAKE", "Voice connection released.", "#CAC4D0");
           if (watchdogTimer) {
             clearInterval(watchdogTimer);
             watchdogTimer = null;
@@ -93,11 +93,18 @@ export default {
     }
     const engine = MediaEngineStore?.getMediaEngine?.();
     if (engine?.setLoopback) {
-      try { engine.setLoopback(false); } catch {}
+      try {
+        engine.setLoopback(false, {
+          echoCancellation: false,
+          noiseSuppression: false,
+          automaticGainControl: false,
+          noiseCancellation: false,
+        });
+      } catch {}
     }
     unpatches.forEach((u) => u());
     unpatches = [];
-    appendLog("BOOT", "God-Mic Engine safely unmounted.", "#F2B8B5");
+    appendLog("CORE", "God-Mic unmounted. Normal volume restored.", "#F2B8B5");
   },
 
   settings: Settings,
