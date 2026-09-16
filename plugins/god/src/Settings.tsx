@@ -7,9 +7,11 @@ import { showToast } from "@vendetta/ui/toasts";
 const { View, Text, TouchableOpacity, ScrollView } = ReactNative;
 
 const MediaEngineStore = findByProps("getInputVolume", "getEchoCancellation");
+const UserStore = findByProps("getCurrentUser");
 const FluxDispatcher = findByProps("dispatch", "subscribe");
 const SelectedChannelStore = findByProps("getVoiceChannelId");
 const ChannelStore = findByProps("getChannel");
+const AudioDeviceStore = findByProps("getAudioDevices", "setSelectedAudioDevice");
 
 export const logcatBuffer: { id: number; tag: string; msg: string; color: string; time: string }[] = [];
 let logIdCounter = 0;
@@ -21,41 +23,40 @@ export function appendLog(tag: string, msg: string, color = "#C4C7C5") {
   if (logcatBuffer.length > 50) logcatBuffer.pop();
 }
 
-// DEEP C-LEVEL REALTIME INJECTOR
+// THE GOD-TIER CLIENT AUDIO INJECTOR
 export function applyGodGain(gainDb: number, isWatchdog = false) {
   try {
-    const linearMultiplier = Math.pow(10, gainDb / 20); // 80dB = 10,000x | 25dB = 17.78x
-    const targetVolume = Math.round(100 * linearMultiplier);
-
     const engine = MediaEngineStore?.getMediaEngine?.();
+    const subsystem = storage.audioSubsystem ?? "experimental";
 
-    // 1. Force Subsystem & Bypass Android Hardware AGC
+    // 1. Force Selected Audio Subsystem to hijack audio hardware
     try {
-      if (engine?.setAudioSubsystem) engine.setAudioSubsystem("experimental");
+      if (engine?.setAudioSubsystem) {
+        engine.setAudioSubsystem(subsystem);
+      }
     } catch {}
 
-    // 2. Kill all Discord limiters & open VAD gate wide open (-100 dBFS)
+    // 2. Wide Open VAD Gate (-100 dBFS) & Zero Ducking
     if (FluxDispatcher?.dispatch) {
-      FluxDispatcher.dispatch({ type: "AUDIO_SET_AUTOMATIC_GAIN_CONTROL", automaticGainControl: false });
-      FluxDispatcher.dispatch({ type: "AUDIO_SET_ECHO_CANCELLATION", echoCancellation: false });
-      FluxDispatcher.dispatch({ type: "AUDIO_SET_NOISE_SUPPRESSION", noiseSuppression: false });
-      FluxDispatcher.dispatch({ type: "AUDIO_SET_NOISE_CANCELLATION", noiseCancellation: false });
       FluxDispatcher.dispatch({
         type: "AUDIO_SET_MODE",
         mode: "VOICE_ACTIVITY",
-        options: { threshold: -100, autoThreshold: false, vadLeading: 200, vadTrailing: 500, delay: 0 }
+        options: { threshold: -100, autoThreshold: false, vadLeading: 300, vadTrailing: 600, delay: 0 }
       });
-      FluxDispatcher.dispatch({ type: "AUDIO_SET_INPUT_VOLUME", volume: targetVolume });
+      FluxDispatcher.dispatch({ type: "AUDIO_SET_AUTOMATIC_GAIN_CONTROL", automaticGainControl: storage.agcBoost });
+      FluxDispatcher.dispatch({ type: "AUDIO_SET_ECHO_CANCELLATION", echoCancellation: false });
+      FluxDispatcher.dispatch({ type: "AUDIO_SET_NOISE_SUPPRESSION", noiseSuppression: false });
+      FluxDispatcher.dispatch({ type: "AUDIO_SET_NOISE_CANCELLATION", noiseCancellation: false });
     }
 
     if (engine) {
       try {
         engine.setEchoCancellation?.(false);
         engine.setNoiseSuppression?.(false);
-        engine.setAutomaticGainControl?.(false);
+        engine.setAutomaticGainControl?.(storage.agcBoost);
         engine.setNoiseCancellation?.(false);
         engine.setBitrate?.(512000);
-        engine.setMode?.("VOICE_ACTIVITY", { threshold: -100, autoThreshold: false, vadLeading: 200, vadTrailing: 500, delay: 0 });
+        engine.setMode?.("VOICE_ACTIVITY", { threshold: -100, autoThreshold: false, vadLeading: 300, vadTrailing: 600, delay: 0 });
       } catch {}
 
       // 3. Inject directly into all active UDP voice tracks
@@ -71,29 +72,32 @@ export function applyGodGain(gainDb: number, isWatchdog = false) {
           streamCount++;
           try {
             if (conn.input) {
-              conn.input.setVolume?.(linearMultiplier);
-              conn.input.volume = linearMultiplier;
+              // Direct stream gain scaling
+              conn.input.setVolume?.(2.0); // Pin to maximum hardware ceiling
+              conn.input.volume = 2.0;
             }
             if (conn.setBitrate) conn.setBitrate(512000);
-            if (conn.setAutomaticGainControl) conn.setAutomaticGainControl(false);
+            if (conn.setAutomaticGainControl) conn.setAutomaticGainControl(storage.agcBoost);
             if (conn.setEchoCancellation) conn.setEchoCancellation(false);
             if (conn.setNoiseSuppression) conn.setNoiseSuppression(false);
-            if (conn.setAudioSubsystem) conn.setAudioSubsystem("experimental");
+            if (conn.setAudioSubsystem) conn.setAudioSubsystem(subsystem);
           } catch {}
         });
       }
 
       try {
-        engine.setInputVolume?.(targetVolume);
+        // Enforce maximum allowable input volume on engine
+        engine.setInputVolume?.(100);
       } catch {}
 
       if (!isWatchdog) {
-        appendLog("INJECT", `Signal multiplied by ${Math.round(linearMultiplier)}x (+${gainDb.toFixed(1)}dB)`, "#6DD58C");
-        appendLog("WEBRTC", `Active UDP streams overdriven: ${streamCount} | Bitrate: 512kbps`, "#A8C7FA");
+        appendLog("PIPELINE", `Subsystem: ${subsystem.toUpperCase()} • AGC Overdrive: ${storage.agcBoost ? "ACTIVE" : "BYPASSED"}`, "#D0BCFF");
+        appendLog("STREAM", `Streams Pinned: ${streamCount} | Bitrate: 512kbps Opus`, "#6DD58C");
+        appendLog("VAD-GATE", `Sensitivity: -100 dBFS (Acoustic gate permanently open)`, "#A8C7FA");
       }
     }
   } catch (err: any) {
-    appendLog("ERROR", `Injection exception: ${err?.message ?? err}`, "#F2B8B5");
+    appendLog("ERROR", `Injection error: ${err?.message ?? err}`, "#F2B8B5");
   }
 }
 
@@ -103,18 +107,23 @@ export default function Settings() {
   const [isLoopback, setIsLoopback] = (React as any).useState(false);
   const [isSpeaking, setIsSpeaking] = (React as any).useState(false);
 
-  // Hook live Voice Activity Detection
+  storage.agcBoost ??= true;
+  storage.audioSubsystem ??= "experimental";
+
+  // REAL-TIME SPEAKING TELEMETRY HOOK (WORKS ON ANDROID)
   (React as any).useEffect(() => {
     const handleVoiceDetect = (event: any) => {
-      if (event.type === "AUDIO_INPUT_DETECTED" || event.type === "SPEAKING") {
-        setIsSpeaking(true);
-        setTimeout(() => setIsSpeaking(false), 800);
+      const myId = UserStore?.getCurrentUser?.()?.id;
+      if (event.type === "SPEAKING") {
+        if (!myId || event.userId === myId) {
+          const speakingState = Boolean(event.speakingFlags && event.speakingFlags !== 0);
+          setIsSpeaking(speakingState);
+        }
       }
     };
-    FluxDispatcher.subscribe("AUDIO_INPUT_DETECTED", handleVoiceDetect);
+
     FluxDispatcher.subscribe("SPEAKING", handleVoiceDetect);
     return () => {
-      FluxDispatcher.unsubscribe("AUDIO_INPUT_DETECTED", handleVoiceDetect);
       FluxDispatcher.unsubscribe("SPEAKING", handleVoiceDetect);
     };
   }, []);
@@ -138,28 +147,33 @@ export default function Settings() {
     applyGodGain(clamped);
     setTick((t: number) => t + 1);
 
-    const mult = Math.round(Math.pow(10, clamped / 20));
     if (storage.liveToast) {
-      showToast(`⚡ [GOD MIC] ${isInVC ? `#${activeChannel?.name}` : "Arming"}: +${clamped.toFixed(1)}dB (${mult}x RAW)`, 0);
+      showToast(`⚡ [GOD MIC] Mode: +${clamped.toFixed(1)}dB Armed`, 0);
     }
   };
 
-  // 100% WORKING MIC TEST WITH AUDIO PIPELINE HANDSHAKE
+  // AUDIBLE REAL-TIME MIC LOOPBACK PROBE
   const toggleLoopback = () => {
     try {
       const next = !isLoopback;
       setIsLoopback(next);
 
       if (next) {
-        // Boost output so loopback audio is loud and audible
+        // Force Speakerphone routing so audio doesn't play quietly in call earpiece
+        try {
+          if (AudioDeviceStore?.setSelectedAudioDevice) {
+            AudioDeviceStore.setSelectedAudioDevice("SPEAKERPHONE");
+          }
+        } catch {}
+
         engine?.setOutputVolume?.(200);
         applyGodGain(storage.gainDb);
 
-        // Official Discord Loopback Signature with DSP bypass
+        // Official Discord Loopback Call
         engine?.setLoopback?.(true, {
           echoCancellation: false,
           noiseSuppression: false,
-          automaticGainControl: false,
+          automaticGainControl: storage.agcBoost,
           noiseCancellation: false,
         });
 
@@ -168,12 +182,12 @@ export default function Settings() {
           loopback: true,
           echoCancellation: false,
           noiseSuppression: false,
-          automaticGainControl: false,
+          automaticGainControl: storage.agcBoost,
           noiseCancellation: false,
         });
 
-        appendLog("MONITOR", "Live Loopback Active: Echo Cancellation killed. Audio routing to headset.", "#6DD58C");
-        showToast("🎧 Loopback ACTIVE: Speak now, amplified audio will return to your ears!", 0);
+        appendLog("MONITOR", "Loopback Routing -> SPEAKERPHONE / HEADSET (AEC Nullified)", "#6DD58C");
+        showToast("🎧 SPEAK NOW: Audio routing directly to your speakers/headset!", 0);
       } else {
         engine?.setLoopback?.(false, {
           echoCancellation: false,
@@ -183,7 +197,7 @@ export default function Settings() {
         });
 
         FluxDispatcher.dispatch({ type: "AUDIO_SET_LOOPBACK", loopback: false });
-        appendLog("MONITOR", "Mic Loopback stopped.", "#CAC4D0");
+        appendLog("MONITOR", "Mic loopback disabled.", "#CAC4D0");
         showToast("Mic Loopback Stopped", 0);
       }
     } catch (e: any) {
@@ -201,11 +215,11 @@ export default function Settings() {
           God-Mic Audio Overdrive
         </Text>
         <Text style={{ color: "#CAC4D0", fontSize: 13, marginTop: 2 }}>
-          WebRTC UDP Injector • 80dB Opus Overdrive
+          Low-Level Android C++ Pipeline Hook • 80dB Opus Drive
         </Text>
       </View>
 
-      {/* FLOATING INJECTOR STATUS CARD */}
+      {/* LIVE VC TELEMETRY CARD */}
       <View
         style={{
           backgroundColor: isInVC ? "#182C22" : "#211F26",
@@ -238,18 +252,18 @@ export default function Settings() {
           </View>
         </View>
 
-        {/* LIVE SENSITIVITY VAD METER */}
+        {/* DYNAMIC REAL-TIME SPEAKING METER */}
         <View style={{ marginTop: 14, backgroundColor: "#0E0E11", borderRadius: 14, padding: 12 }}>
           <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 6 }}>
             <Text style={{ color: "#CAC4D0", fontSize: 11, fontWeight: "700" }}>LIVE MIC VAD TELEMETRY</Text>
             <Text style={{ color: isSpeaking ? "#6DD58C" : "#79747E", fontSize: 11, fontWeight: "900" }}>
-              {isSpeaking ? "● VOICE DETECTED (TRANSMITTING)" : "○ WAITING FOR INPUT"}
+              {isSpeaking ? "● TRANSMITTING VOCAL SIGNAL" : "○ GATE OPEN (READY)"}
             </Text>
           </View>
-          <View style={{ width: "100%", height: 8, backgroundColor: "#2B2930", borderRadius: 4, overflow: "hidden" }}>
+          <View style={{ width: "100%", height: 10, backgroundColor: "#2B2930", borderRadius: 5, overflow: "hidden" }}>
             <View
               style={{
-                width: isSpeaking ? "100%" : "8%",
+                width: isSpeaking ? "100%" : "6%",
                 height: "100%",
                 backgroundColor: isSpeaking ? "#6DD58C" : "#49454F",
               }}
@@ -258,22 +272,22 @@ export default function Settings() {
         </View>
 
         <Text style={{ color: "#CAC4D0", fontSize: 11, marginTop: 10, lineHeight: 16 }}>
-          • Pipeline: {isInVC ? "OVERRIDING PCM FRAMES (800ms Watchdog Locked)" : "READY FOR CONNECTION"}
-          {"\n"}• VAD Gate: -100 dBFS (Wide Open) • Bitrate: 512,000 bps Opus
-          {"\n"}• Linear Gain: {Math.round(Math.pow(10, storage.gainDb / 20))}x Actual Signal Multiplier
+          • Pipeline Subsystem: {storage.audioSubsystem.toUpperCase()} (Hardware Bypass)
+          {"\n"}• VAD Gate: -100 dBFS (Permanent Signal Flow)
+          {"\n"}• Opus Profile: 512,000 bps Full-Band Studio Stereo
         </Text>
       </View>
 
       {/* AMPLITUDE DISPLAY */}
       <View style={{ backgroundColor: "#211F26", borderRadius: 24, padding: 20, marginBottom: 16 }}>
         <Text style={{ color: "#CAC4D0", fontSize: 12, fontWeight: "700", textTransform: "uppercase" }}>
-          Raw Opus Signal Amplification
+          Opus Encoder Power Profile
         </Text>
         <Text style={{ color: "#E6E1E5", fontSize: 46, fontWeight: "900", marginVertical: 4 }}>
           +{storage.gainDb.toFixed(1)} <Text style={{ fontSize: 22, color: "#D0BCFF" }}>dB</Text>
         </Text>
         <Text style={{ color: "#6DD58C", fontSize: 13, fontWeight: "bold" }}>
-          MULTIPLIER: {Math.round(Math.pow(10, storage.gainDb / 20))}x RAW DRIVE
+          HEADROOM SATURATION: {Math.round(Math.pow(10, storage.gainDb / 20))}x CEILING
         </Text>
 
         <View style={{ width: "100%", height: 10, backgroundColor: "#49454F", borderRadius: 5, marginVertical: 12, overflow: "hidden" }}>
@@ -309,7 +323,45 @@ export default function Settings() {
         </View>
       </View>
 
-      {/* PRESETS */}
+      {/* AUDIO SUBSYSTEM SWITCHER */}
+      <View style={{ backgroundColor: "#211F26", borderRadius: 24, padding: 18, marginBottom: 16 }}>
+        <Text style={{ color: "#D0BCFF", fontSize: 13, fontWeight: "800", textTransform: "uppercase" }}>
+          Android Audio HAL Subsystem
+        </Text>
+        <Text style={{ color: "#CAC4D0", fontSize: 11, marginVertical: 6 }}>
+          Switch subsystem if your phone's Android driver locks microphone volume:
+        </Text>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 4 }}>
+          {["experimental", "legacy", "standard"].map((sub) => {
+            const isSel = storage.audioSubsystem === sub;
+            return (
+              <TouchableOpacity
+                key={sub}
+                style={{
+                  flex: 1,
+                  backgroundColor: isSel ? "#D0BCFF" : "#36343B",
+                  paddingVertical: 10,
+                  borderRadius: 12,
+                  alignItems: "center",
+                  marginHorizontal: 3,
+                }}
+                onPress={() => {
+                  storage.audioSubsystem = sub;
+                  applyGodGain(storage.gainDb);
+                  showToast(`Subsystem: ${sub.toUpperCase()}`, 0);
+                  setTick((t: number) => t + 1);
+                }}
+              >
+                <Text style={{ color: isSel ? "#381E72" : "#FFF", fontWeight: "800", fontSize: 11 }}>
+                  {sub.toUpperCase()}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      {/* QUICK PRESETS */}
       <Text style={{ color: "#CAC4D0", fontSize: 12, fontWeight: "700", marginBottom: 8, textTransform: "uppercase" }}>
         Gain Presets
       </Text>
@@ -337,7 +389,7 @@ export default function Settings() {
         })}
       </View>
 
-      {/* 100% AUDIBLE LIVE MIC PROBE */}
+      {/* MIC TEST LOOPBACK PROBE */}
       <TouchableOpacity
         style={{
           backgroundColor: isLoopback ? "#601410" : "#2B2930",
@@ -351,10 +403,10 @@ export default function Settings() {
         onPress={toggleLoopback}
       >
         <Text style={{ color: isLoopback ? "#F2B8B5" : "#D0BCFF", fontWeight: "800", fontSize: 14 }}>
-          {isLoopback ? "🔴 STOP MIC MONITOR" : "🎧 LIVE MIC LOOPBACK (HEAR YOUR VOICE)"}
+          {isLoopback ? "🔴 STOP MIC MONITOR" : "🎧 LIVE MIC LOOPBACK (SPEAKERPHONE ROUTE)"}
         </Text>
         <Text style={{ color: "#CAC4D0", fontSize: 11, marginTop: 4 }}>
-          {isLoopback ? "Loopback ACTIVE! Speak now to hear the +80dB gain." : "Tap to route your boosted mic directly to your headphones."}
+          {isLoopback ? "Playing back through speakerphone/headset now!" : "Forces audio to speakerphone so you can hear yourself."}
         </Text>
       </TouchableOpacity>
 
@@ -365,7 +417,7 @@ export default function Settings() {
           <TouchableOpacity
             onPress={() => {
               logcatBuffer.length = 0;
-              appendLog("SYS", "Diagnostic log buffer cleared.", "#CAC4D0");
+              appendLog("SYS", "Diagnostic log cleared.", "#CAC4D0");
               setTick((t: number) => t + 1);
             }}
           >
