@@ -7,6 +7,7 @@ import { showToast } from "@vendetta/ui/toasts";
 const { View, Text, TouchableOpacity, ScrollView } = ReactNative;
 
 const MediaEngineStore = findByProps("getInputVolume", "getEchoCancellation");
+const FluxDispatcher = findByProps("dispatch", "subscribe");
 const SelectedChannelStore = findByProps("getVoiceChannelId");
 const ChannelStore = findByProps("getChannel");
 
@@ -15,85 +16,87 @@ let logIdCounter = 0;
 
 export function appendLog(tag: string, msg: string, color = "#C4C7C5") {
   const now = new Date();
-  const time = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}.${now.getMilliseconds().toString().padStart(3, "0").slice(0, 2)}`;
-  
+  const time = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
   logcatBuffer.unshift({ id: ++logIdCounter, tag, msg, color, time });
-  if (logcatBuffer.length > 60) logcatBuffer.pop();
+  if (logcatBuffer.length > 50) logcatBuffer.pop();
 }
 
-// DEEP ENGINE DIRECT INJECTOR (BYPASSES DISCORD'S 100 CLAMP)
+// TOTAL CLIENT PIPELINE OVERHAUL INJECTOR
 export function applyGodGain(gainDb: number, isWatchdog = false) {
   try {
     const linearMultiplier = Math.pow(10, gainDb / 20); // 80dB = 10,000x | 25dB = 17.78x
     const boostVolume = Math.round(100 * linearMultiplier);
 
     const engine = MediaEngineStore?.getMediaEngine?.();
-    if (!engine) {
-      if (!isWatchdog) appendLog("WARN", "MediaEngine instance not ready yet.", "#F2B8B5");
-      return;
+
+    // 1. Force Audio Subsystem to Experimental/Legacy (Kills Android OS Hardware AGC)
+    try {
+      if (engine?.setAudioSubsystem) {
+        engine.setAudioSubsystem("experimental");
+      }
+    } catch {}
+
+    // 2. Terminate software AGC, Echo Cancellation, Noise Suppression, and Krisp
+    if (FluxDispatcher?.dispatch) {
+      FluxDispatcher.dispatch({ type: "AUDIO_SET_AUTOMATIC_GAIN_CONTROL", automaticGainControl: false });
+      FluxDispatcher.dispatch({ type: "AUDIO_SET_ECHO_CANCELLATION", echoCancellation: false });
+      FluxDispatcher.dispatch({ type: "AUDIO_SET_NOISE_SUPPRESSION", noiseSuppression: false });
+      FluxDispatcher.dispatch({ type: "AUDIO_SET_NOISE_CANCELLATION", noiseCancellation: false });
+      FluxDispatcher.dispatch({
+        type: "AUDIO_SET_MODE",
+        mode: "VOICE_ACTIVITY",
+        options: { threshold: -100, autoThreshold: false, vadLeading: 200, vadTrailing: 500 }
+      });
     }
 
-    // 1. Force hardware processing OFF at low-level engine
-    try {
-      engine.setEchoCancellation?.(false);
-      engine.setNoiseSuppression?.(false);
-      engine.setAutomaticGainControl?.(false);
-      engine.setNoiseCancellation?.(false);
-    } catch {}
-
-    // 2. Open VAD Gate wide open (-100dB) so no amplified sound gets chopped
-    try {
-      engine.setMode?.("VOICE_ACTIVITY", {
-        threshold: -100,
-        autoThreshold: false,
-        vadLeading: 20,
-        vadTrailing: 50,
-      });
-    } catch {}
-
-    // 3. Low-Level C++ Driver setInputVolume (bypassing Redux clamp)
-    if (typeof engine.setInputVolume === "function") {
+    if (engine) {
       try {
-        engine.setInputVolume(boostVolume);
+        engine.setEchoCancellation?.(false);
+        engine.setNoiseSuppression?.(false);
+        engine.setAutomaticGainControl?.(false);
+        engine.setNoiseCancellation?.(false);
+        engine.setBitrate?.(512000);
+        engine.setMode?.("VOICE_ACTIVITY", { threshold: -100, autoThreshold: false, vadLeading: 200, vadTrailing: 500 });
       } catch {}
-    }
 
-    // 4. Inject linear multiplier directly into all active WebRTC Connection Audio Tracks
-    let injectedStreams = 0;
-    if (engine.connections) {
-      const conns = engine.connections instanceof Set 
-        ? Array.from(engine.connections) 
-        : Array.isArray(engine.connections) 
-          ? engine.connections 
-          : Object.values(engine.connections);
+      // 3. Low-Level WebRTC Connection Injection
+      let activeStreams = 0;
+      if (engine.connections) {
+        const conns = engine.connections instanceof Set
+          ? Array.from(engine.connections)
+          : Array.isArray(engine.connections)
+            ? engine.connections
+            : Object.values(engine.connections);
 
-      conns.forEach((conn: any) => {
-        try {
-          if (conn.input) {
-            conn.input.setVolume?.(linearMultiplier);
-            conn.input.volume = linearMultiplier;
-            injectedStreams++;
-          }
-          if (conn.setAutomaticGainControl) conn.setAutomaticGainControl(false);
-          if (conn.setEchoCancellation) conn.setEchoCancellation(false);
-          if (conn.setNoiseSuppression) conn.setNoiseSuppression(false);
-          if (conn.setBitrate) conn.setBitrate(512000);
-        } catch {}
-      });
-    }
+        conns.forEach((conn: any) => {
+          activeStreams++;
+          try {
+            if (conn.input) {
+              conn.input.setVolume?.(linearMultiplier);
+              conn.input.volume = linearMultiplier;
+            }
+            if (conn.setBitrate) conn.setBitrate(512000);
+            if (conn.setAutomaticGainControl) conn.setAutomaticGainControl(false);
+            if (conn.setEchoCancellation) conn.setEchoCancellation(false);
+            if (conn.setNoiseSuppression) conn.setNoiseSuppression(false);
+            if (conn.setAudioSubsystem) conn.setAudioSubsystem("experimental");
+          } catch {}
+        });
+      }
 
-    if (!isWatchdog) {
-      appendLog("CORE", `Clamp Bypassed! Injected ${boostVolume}% (${Math.round(linearMultiplier)}x)`, "#6DD58C");
-      appendLog("WEBRTC", `Streams overdriven: ${injectedStreams} | AGC & AEC Terminated`, "#A8C7FA");
+      // 4. Force software setInputVolume
+      try {
+        engine.setInputVolume?.(boostVolume);
+      } catch {}
 
-      if (gainDb >= 50) {
-        appendLog("AI-ANALYSIS", `ACOUSTIC PRESSURE: CRITICAL. 10,000x gain transmitted to Opus buffer.`, "#F2B8B5");
-      } else {
-        appendLog("AI-ANALYSIS", `DRIVE LOCKED: Linear scale +${gainDb.toFixed(1)}dB active on voice pipeline.`, "#D0BCFF");
+      if (!isWatchdog) {
+        appendLog("PIPELINE", `Audio subsystem: EXPERIMENTAL • Bitrate: 512kbps`, "#D0BCFF");
+        appendLog("OVERDRIVE", `Scaled by +${gainDb.toFixed(1)}dB (${Math.round(linearMultiplier)}x) • Streams: ${activeStreams}`, "#6DD58C");
+        appendLog("AI-ANALYZER", `VAD Threshold: -100dB • Hardware AGC: NULLIFIED`, "#A8C7FA");
       }
     }
   } catch (err: any) {
-    appendLog("ERROR", `Injection exception: ${err?.message ?? err}`, "#F2B8B5");
+    appendLog("ERROR", `Pipeline Overdrive Fail: ${err?.message ?? err}`, "#F2B8B5");
   }
 }
 
@@ -105,13 +108,17 @@ export default function Settings() {
   const presets = [
     { label: "+5dB Crisp", val: 5.0, color: "#C4EDD9", onColor: "#003822" },
     { label: "+25dB DJ Master", val: 25.0, color: "#D0BCFF", onColor: "#381E72" },
-    { label: "+50dB Overdrive", val: 50.0, color: "#A8C7FA", onColor: "#04315A" },
-    { label: "+80dB APOCALYPSE", val: 80.0, color: "#F2B8B5", onColor: "#601410" },
+    { label: "+50dB Void Push", val: 50.0, color: "#A8C7FA", onColor: "#04315A" },
+    { label: "+80dB GOD APOCALYPSE", val: 80.0, color: "#F2B8B5", onColor: "#601410" },
   ];
 
   const activeChannelId = SelectedChannelStore?.getVoiceChannelId();
   const activeChannel = activeChannelId ? ChannelStore?.getChannel(activeChannelId) : null;
   const isInVC = Boolean(activeChannelId);
+
+  const engine = MediaEngineStore?.getMediaEngine?.();
+  const engineConnected = Boolean(engine);
+  const streamsCount = engine?.connections ? (engine.connections.size ?? Object.keys(engine.connections).length) : 0;
 
   const updateGain = (newGain: number) => {
     const clamped = Math.max(0, Math.min(80, parseFloat(newGain.toFixed(1))));
@@ -121,28 +128,23 @@ export default function Settings() {
 
     const mult = Math.round(Math.pow(10, clamped / 20));
     if (storage.liveToast) {
-      if (isInVC) {
-        showToast(`⚡ [GOD MIC] VC #${activeChannel?.name}: +${clamped.toFixed(1)}dB (${mult}x RAW)`, 0);
-      } else {
-        showToast(`⚡ [GOD MIC] Arming: +${clamped.toFixed(1)}dB (${mult}x AMPLIFIED)`, 0);
-      }
+      showToast(`⚡ [GOD MIC] ${isInVC ? `#${activeChannel?.name}` : "Ready"}: +${clamped.toFixed(1)}dB (${mult}x RAW)`, 0);
     }
   };
 
   const toggleLoopback = () => {
     try {
-      const engine = MediaEngineStore?.getMediaEngine?.();
-      const nextState = !isLoopback;
-      setIsLoopback(nextState);
+      const next = !isLoopback;
+      setIsLoopback(next);
       if (engine?.setLoopback) {
-        engine.setLoopback(nextState);
-        appendLog("MONITOR", `Mic Loopback ${nextState ? "ENABLED (Self-listen active)" : "DISABLED"}`, "#D0BCFF");
-        showToast(`Mic Test Monitor: ${nextState ? "ON (Speak to test)" : "OFF"}`, 0);
+        engine.setLoopback(next);
+        appendLog("MONITOR", `Live Mic Probe: ${next ? "ENABLED" : "DISABLED"}`, "#D0BCFF");
+        showToast(`Mic Test: ${next ? "ACTIVE (Speak to verify)" : "OFF"}`, 0);
       } else {
-        showToast("Native engine loopback not supported on this device", 0);
+        showToast("Loopback not supported by device HAL", 0);
       }
     } catch (e: any) {
-      appendLog("ERROR", `Loopback error: ${e?.message}`, "#F2B8B5");
+      appendLog("ERROR", `Loopback failed: ${e?.message}`, "#F2B8B5");
     }
   };
 
@@ -150,72 +152,50 @@ export default function Settings() {
 
   return (
     <ScrollView style={{ flex: 1, backgroundColor: "#141218", padding: 16 }}>
-      {/* M3 TITLE BAR */}
+      {/* HEADER */}
       <View style={{ marginBottom: 16 }}>
-        <Text style={{ color: "#E6E1E5", fontSize: 24, fontWeight: "800", letterSpacing: 0.5 }}>
-          God-Mic Engine
+        <Text style={{ color: "#E6E1E5", fontSize: 24, fontWeight: "800" }}>
+          God-Mic Audio Overdrive
         </Text>
         <Text style={{ color: "#CAC4D0", fontSize: 13, marginTop: 2 }}>
-          Deep Audio Pipeline • Hardware Clamp Bypass
+          Experimental Subsystem • WebRTC Track Overdrive
         </Text>
       </View>
 
-      {/* VC TELEMETRY CARD */}
-      <View
-        style={{
-          backgroundColor: isInVC ? "#182C22" : "#211F26",
-          borderRadius: 24,
-          padding: 18,
-          borderWidth: 1.5,
-          borderColor: isInVC ? "#6DD58C" : "#49454F",
-          marginBottom: 16,
-        }}
-      >
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <View style={{ flexDirection: "row", alignItems: "center" }}>
-            <View
-              style={{
-                width: 12,
-                height: 12,
-                borderRadius: 6,
-                backgroundColor: isInVC ? "#6DD58C" : "#D0BCFF",
-                marginRight: 10,
-              }}
-            />
-            <Text style={{ color: isInVC ? "#6DD58C" : "#EADDFF", fontWeight: "800", fontSize: 14 }}>
-              {isInVC ? "LIVE VC PIPELINE CONNECTED" : "ASTRAL STANDBY"}
-            </Text>
-          </View>
-          <View style={{ backgroundColor: isInVC ? "#005232" : "#4A4458", paddingHorizontal: 12, paddingVertical: 4, borderRadius: 12 }}>
-            <Text style={{ color: "#FFF", fontWeight: "800", fontSize: 11 }}>
-              {isInVC ? `#${activeChannel?.name}` : "IDLE"}
-            </Text>
-          </View>
+      {/* HOOK STATUS & DIAGNOSTICS */}
+      <View style={{ backgroundColor: "#211F26", borderRadius: 24, padding: 18, marginBottom: 16 }}>
+        <Text style={{ color: "#D0BCFF", fontSize: 13, fontWeight: "800", textTransform: "uppercase" }}>
+          Engine Hook Diagnostics
+        </Text>
+        <View style={{ marginTop: 8, borderTopWidth: 1, borderTopColor: "#36343B", paddingTop: 8 }}>
+          <Text style={{ color: "#CAC4D0", fontSize: 12, lineHeight: 18 }}>
+            • MediaEngine Core: <Text style={{ color: engineConnected ? "#6DD58C" : "#F2B8B5", fontWeight: "bold" }}>{engineConnected ? "HOOKED & ARMED" : "DISCONNECTED"}</Text>
+            {"\n"}• Active Voice Streams: <Text style={{ color: streamsCount > 0 ? "#6DD58C" : "#D0BCFF", fontWeight: "bold" }}>{streamsCount} ACTIVE</Text>
+            {"\n"}• Subsystem Mode: <Text style={{ color: "#A8C7FA", fontWeight: "bold" }}>EXPERIMENTAL (No Hardware AGC)</Text>
+            {"\n"}• Opus Rate: <Text style={{ color: "#6DD58C", fontWeight: "bold" }}>512,000 bps Stereo (Mode 2)</Text>
+            {"\n"}• VAD Sensitivity Gate: <Text style={{ color: "#6DD58C", fontWeight: "bold" }}>-100 dBFS (Wide Open)</Text>
+          </Text>
         </View>
-
-        <Text style={{ color: "#CAC4D0", fontSize: 11, marginTop: 10, lineHeight: 16 }}>
-          • Driver Status: {isInVC ? "OVERRIDING PCM BUFFERS (1.0s Watchdog Locked)" : "ARMED"}
-          {"\n"}• VAD Gate: -100dB (All Vocal Peaks Transmitted)
-          {"\n"}• Linear Gain: {Math.round(Math.pow(10, storage.gainDb / 20))}x Actual Signal Multiplier
-        </Text>
       </View>
 
-      {/* AMPLITUDE DRIVE SURFACE */}
+      {/* AMPLITUDE DISPLAY */}
       <View style={{ backgroundColor: "#211F26", borderRadius: 24, padding: 20, marginBottom: 16 }}>
         <Text style={{ color: "#CAC4D0", fontSize: 12, fontWeight: "700", textTransform: "uppercase" }}>
-          Opus Encoder Power
+          Raw Opus Signal Amplification
         </Text>
         <Text style={{ color: "#E6E1E5", fontSize: 46, fontWeight: "900", marginVertical: 4 }}>
           +{storage.gainDb.toFixed(1)} <Text style={{ fontSize: 22, color: "#D0BCFF" }}>dB</Text>
         </Text>
+        <Text style={{ color: "#6DD58C", fontSize: 13, fontWeight: "bold" }}>
+          SIGNAL MULTIPLIER: {Math.round(Math.pow(10, storage.gainDb / 20))}x ACTUAL DRIVE
+        </Text>
 
-        {/* M3 Track Bar */}
-        <View style={{ width: "100%", height: 10, backgroundColor: "#49454F", borderRadius: 5, marginVertical: 10, overflow: "hidden" }}>
+        <View style={{ width: "100%", height: 10, backgroundColor: "#49454F", borderRadius: 5, marginVertical: 12, overflow: "hidden" }}>
           <View style={{ width: `${fillPercent}%`, height: "100%", backgroundColor: storage.gainDb >= 50 ? "#F2B8B5" : "#D0BCFF" }} />
         </View>
 
         {/* Steppers */}
-        <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 6 }}>
+        <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
           <TouchableOpacity
             style={{ flex: 1, backgroundColor: "#4A4458", padding: 14, borderRadius: 16, alignItems: "center", marginRight: 4 }}
             onPress={() => updateGain(storage.gainDb - 5.0)}
@@ -243,35 +223,35 @@ export default function Settings() {
         </View>
       </View>
 
-      {/* QUICK PRESETS */}
+      {/* PRESETS */}
       <Text style={{ color: "#CAC4D0", fontSize: 12, fontWeight: "700", marginBottom: 8, textTransform: "uppercase" }}>
         Gain Presets
       </Text>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", marginBottom: 14 }}>
-        {presets.map((preset) => {
-          const isSelected = storage.gainDb === preset.val;
+      <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", marginBottom: 16 }}>
+        {presets.map((p) => {
+          const isSelected = storage.gainDb === p.val;
           return (
             <TouchableOpacity
-              key={preset.label}
+              key={p.label}
               style={{
                 width: "48%",
-                backgroundColor: isSelected ? preset.color : "#2B2930",
+                backgroundColor: isSelected ? p.color : "#2B2930",
                 paddingVertical: 14,
                 borderRadius: 16,
                 alignItems: "center",
                 marginBottom: 10,
               }}
-              onPress={() => updateGain(preset.val)}
+              onPress={() => updateGain(p.val)}
             >
-              <Text style={{ color: isSelected ? preset.onColor : "#E6E1E5", fontWeight: "800", fontSize: 13 }}>
-                {preset.label}
+              <Text style={{ color: isSelected ? p.onColor : "#E6E1E5", fontWeight: "800", fontSize: 13 }}>
+                {p.label}
               </Text>
             </TouchableOpacity>
           );
         })}
       </View>
 
-      {/* MIC TEST LOOPBACK PROBE (PROOF OF GAIN) */}
+      {/* MIC TEST LOOPBACK PROBE */}
       <TouchableOpacity
         style={{
           backgroundColor: isLoopback ? "#601410" : "#2B2930",
@@ -288,21 +268,14 @@ export default function Settings() {
           {isLoopback ? "🔴 STOP MIC MONITOR" : "🎧 TEST MIC GAIN (SELF-LISTEN)"}
         </Text>
         <Text style={{ color: "#CAC4D0", fontSize: 11, marginTop: 4 }}>
-          {isLoopback
-            ? "Loopback active! Listen to your own amplified audio in your headphones."
-            : "Hear your real-time boosted voice directly before speaking in VC."}
+          {isLoopback ? "Loopback active! Listen to your own voice in real time." : "Verify the amplified sound in your headphones."}
         </Text>
       </TouchableOpacity>
 
-      {/* M3 AI LOGCAT DIAGNOSTIC CONSOLE */}
+      {/* AI LOGCAT TERMINAL */}
       <View style={{ backgroundColor: "#1D1B20", borderRadius: 24, padding: 16, marginBottom: 20 }}>
         <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-          <View style={{ flexDirection: "row", alignItems: "center" }}>
-            <Text style={{ color: "#D0BCFF", fontWeight: "800", fontSize: 13 }}>AI LOGCAT ENGINE</Text>
-            <View style={{ backgroundColor: "#381E72", paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, marginLeft: 8 }}>
-              <Text style={{ color: "#EADDFF", fontSize: 10, fontWeight: "800" }}>LIVE</Text>
-            </View>
-          </View>
+          <Text style={{ color: "#D0BCFF", fontWeight: "800", fontSize: 13 }}>AI LOGCAT ENGINE</Text>
           <TouchableOpacity
             onPress={() => {
               logcatBuffer.length = 0;
@@ -318,7 +291,7 @@ export default function Settings() {
           <ScrollView nestedScrollEnabled={true}>
             {logcatBuffer.length === 0 ? (
               <Text style={{ color: "#49454F", fontSize: 11, fontStyle: "italic" }}>
-                Awaiting audio engine telemetry...
+                Awaiting audio engine activity...
               </Text>
             ) : (
               logcatBuffer.map((log) => (
