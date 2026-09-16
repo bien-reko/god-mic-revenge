@@ -10,6 +10,7 @@ const ChannelStore = findByProps("getChannel");
 
 storage.gainDb ??= 80.0;
 storage.liveToast ??= true;
+storage.audioSubsystem ??= "experimental";
 
 let unpatches: (() => void)[] = [];
 let watchdogTimer: any = null;
@@ -21,21 +22,9 @@ export default {
     try {
       const engine = MediaEngineStore?.getMediaEngine?.();
       if (engine) {
-        // Enforce experimental subsystem to decouple from Android OS AGC
         try {
-          if (engine.setAudioSubsystem) engine.setAudioSubsystem("experimental");
+          if (engine.setAudioSubsystem) engine.setAudioSubsystem(storage.audioSubsystem);
         } catch {}
-
-        // Hijack engine.setInputVolume to permanently override the 100 clamp
-        const origSetInputVolume = engine.setInputVolume?.bind(engine);
-        if (origSetInputVolume) {
-          engine.setInputVolume = function (vol: number) {
-            const linearMultiplier = Math.pow(10, storage.gainDb / 20);
-            const boosted = Math.round(100 * linearMultiplier);
-            return origSetInputVolume(boosted);
-          };
-          unpatches.push(() => { engine.setInputVolume = origSetInputVolume; });
-        }
 
         applyGodGain(storage.gainDb);
       }
@@ -58,7 +47,7 @@ export default {
             showToast(`⚡ [GOD MIC ACTIVE] #${channel?.name ?? "VC"} | +${storage.gainDb.toFixed(1)}dB (${mult}x RAW)`, 0);
           }
 
-          // Active 800ms Watchdog: Continuously forces gain into active WebRTC connection streams
+          // Active Watchdog: Continuously enforces uncompressed stream
           if (!watchdogTimer) {
             watchdogTimer = setInterval(() => {
               const inVC = Boolean(SelectedChannelStore?.getVoiceChannelId());
@@ -71,7 +60,7 @@ export default {
             }, 800);
           }
         } else if (event.state === "RTC_DISCONNECTED") {
-          appendLog("HANDSHAKE", "Voice connection released.", "#CAC4D0");
+          appendLog("HANDSHAKE", "Voice channel disconnected.", "#CAC4D0");
           if (watchdogTimer) {
             clearInterval(watchdogTimer);
             watchdogTimer = null;
